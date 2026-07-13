@@ -18,6 +18,7 @@ export interface JsonRequestOptions {
   query?: Record<string, QueryValue>;
   body?: unknown;
   phase?: ProviderRequestPhase;
+  maxResponseBytes?: number;
 }
 
 export async function requestJson(input: JsonRequestOptions): Promise<unknown> {
@@ -30,7 +31,7 @@ export async function requestJson(input: JsonRequestOptions): Promise<unknown> {
       body: input.body === undefined ? undefined : JSON.stringify(input.body),
       signal: input.signal,
     });
-    payload = await readJsonResponse(response, input.providerName);
+    payload = await readJsonResponse(response, input.providerName, input.maxResponseBytes);
   } catch (error) {
     if (error instanceof ProviderRequestError) {
       throw error;
@@ -109,8 +110,8 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some((key) => key.toLowerCase() === normalized);
 }
 
-async function readJsonResponse(response: Response, providerName: string): Promise<unknown> {
-  const text = await response.text();
+async function readJsonResponse(response: Response, providerName: string, maxResponseBytes?: number): Promise<unknown> {
+  const text = await readResponseText(response, providerName, maxResponseBytes);
   if (!text.trim()) {
     return null;
   }
@@ -119,6 +120,48 @@ async function readJsonResponse(response: Response, providerName: string): Promi
   } catch {
     throw new ProviderRequestError(502, `${providerName} returned invalid JSON`);
   }
+}
+
+async function readResponseText(response: Response, providerName: string, maxResponseBytes?: number): Promise<string> {
+  if (maxResponseBytes === undefined) {
+    return response.text();
+  }
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+    throw new ProviderRequestError(500, "maxResponseBytes must be a positive integer");
+  }
+
+  const contentLength = response.headers.get("content-length");
+  if (contentLength) {
+    const parsedLength = Number.parseInt(contentLength, 10);
+    if (Number.isFinite(parsedLength) && parsedLength > maxResponseBytes) {
+      throw responseSizeError(providerName, maxResponseBytes);
+    }
+  }
+
+  if (!response.body) {
+    return "";
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    totalBytes += value.byteLength;
+    if (totalBytes > maxResponseBytes) {
+      await reader.cancel();
+      throw responseSizeError(providerName, maxResponseBytes);
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+function responseSizeError(providerName: string, maxResponseBytes: number): ProviderRequestError {
+  return new ProviderRequestError(502, `${providerName} response exceeded ${maxResponseBytes} bytes`);
 }
 
 function createJsonRequestError(
