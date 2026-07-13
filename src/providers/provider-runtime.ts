@@ -153,6 +153,7 @@ const blockedProxyRequestHeaders = new Set([
   "transfer-encoding",
 ]);
 const defaultProviderProxyMaxResponseBytes = 20 * 1024 * 1024;
+const defaultProviderJsonMaxResponseBytes = 20 * 1024 * 1024;
 
 export function createProviderProxyUrl(baseUrl: string, endpointInput: unknown, queryInput?: unknown): URL {
   const endpoint = normalizeProviderProxyEndpoint(endpointInput);
@@ -478,6 +479,13 @@ export function isAbortLikeError(error: unknown): boolean {
 }
 
 /**
+ * Return whether an error came from a specific aborted signal.
+ */
+export function isAbortSignalError(signal: AbortSignal | undefined, error: unknown): boolean {
+  return signal?.aborted === true && isAbortLikeError(error);
+}
+
+/**
  * Set defined query parameters on a URL.
  */
 export function setSearchParams(url: URL, query: Record<string, string | undefined>): void {
@@ -498,6 +506,59 @@ export async function readProviderJson<T>(response: Response, source: string): P
 
   const text = await response.text().catch(() => "");
   throw new ProviderRequestError(response.status, text || `${source} request failed`);
+}
+
+export interface ReadProviderJsonBodyOptions {
+  emptyBody: unknown;
+  invalidJsonMessage: string;
+  invalidJsonStatus?: number;
+  invalidJsonFallback?: (text: string, error: unknown) => unknown;
+  maxBytes?: number;
+  trimEmptyBody?: boolean;
+}
+
+/**
+ * Read a bounded provider response body as text.
+ */
+export async function readProviderTextBody(
+  response: Response,
+  fieldName: string,
+  maxBytes: number = defaultProviderJsonMaxResponseBytes,
+): Promise<string> {
+  const bytes = await readBoundedResponseBytes(response, {
+    maxBytes,
+    fieldName,
+    createError: (message) => new ProviderRequestError(413, message),
+  });
+  return new TextDecoder().decode(bytes);
+}
+
+/**
+ * Read a bounded provider response body as JSON.
+ */
+export async function readProviderJsonBody(response: Response, options: ReadProviderJsonBodyOptions): Promise<unknown> {
+  const text = await readProviderTextBody(response, "provider JSON response", options.maxBytes);
+  return parseProviderJsonBodyText(text, options);
+}
+
+/**
+ * Parse an already-read provider response body as JSON.
+ */
+export function parseProviderJsonBodyText(text: string, options: ReadProviderJsonBodyOptions): unknown {
+  const isEmpty = options.trimEmptyBody === false ? text === "" : text.trim() === "";
+  if (isEmpty) {
+    return options.emptyBody;
+  }
+
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (error) {
+    const fallback = options.invalidJsonFallback?.(text, error);
+    if (fallback !== undefined) {
+      return fallback;
+    }
+    throw new ProviderRequestError(options.invalidJsonStatus ?? 502, options.invalidJsonMessage, error);
+  }
 }
 
 /**
