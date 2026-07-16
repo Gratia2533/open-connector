@@ -30,7 +30,13 @@ services:
         finnhub.get_basic_financials,
         finnhub.get_financial_reports,
         finnhub.get_stock_candles,
-        finnhub.get_company_news
+        finnhub.get_company_news,
+        cloudflare_tunnel.list_tunnels,
+        cloudflare_tunnel.get_tunnel,
+        cloudflare_tunnel.get_tunnel_configuration,
+        cloudflare_tunnel.list_tunnel_connections,
+        cloudflare_tunnel.add_published_application,
+        cloudflare_tunnel.verify_published_application
       OOMOL_CONNECT_ALLOWED_PROXIES: ""
       OOMOL_CONNECT_BLOCKED_PROXIES: "*"
     volumes:

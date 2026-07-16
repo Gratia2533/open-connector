@@ -128,7 +128,7 @@ run `npm run deploy:cloudflare`.
 
 ## Quick Start
 
-This branch's Compose file is a dedicated stock-provider deployment. It builds the local source, binds only to `127.0.0.1:8001`, allows the 15 curated FinMind/Finnhub actions, and blocks every generic provider proxy. Compose fails closed unless all three runtime secrets are supplied.
+The included Compose file is a dedicated stock and Cloudflare Tunnel deployment. It builds the local source, binds only to `127.0.0.1:8001`, allows the 21 curated FinMind, Finnhub, and Cloudflare Tunnel actions, and blocks every generic provider proxy. Compose fails closed unless all three runtime secrets are supplied.
 
 Create a private local `.env` without placing secret values in shell history:
 
@@ -150,7 +150,7 @@ http://127.0.0.1:8001
 http://127.0.0.1:8001/docs
 ```
 
-Add FinMind and Finnhub credentials through the local console or another local hidden-input onboarding flow. Never put upstream tokens in Compose YAML, Git, command-line arguments, or chat. Runtime callers receive only `OOMOL_CONNECT_RUNTIME_TOKEN` and can execute only actions present in `OOMOL_CONNECT_ALLOWED_ACTIONS`.
+Add FinMind, Finnhub, and Cloudflare Tunnel credentials through the local console or another local hidden-input onboarding flow. The Cloudflare connection uses one API Token plus its Account ID; published-application actions may resolve a unique Zone by name and never expose a generic Cloudflare REST proxy. Never put upstream tokens in Compose YAML, Git, command-line arguments, or chat. Runtime callers receive only `OOMOL_CONNECT_RUNTIME_TOKEN` and can execute only actions present in `OOMOL_CONNECT_ALLOWED_ACTIONS`.
 
 For the generic upstream development workflow, OAuth, named connections, credential encryption, token refresh, and action policy details, see [docs/quickstart.md](docs/quickstart.md), [docs/credentials.md](docs/credentials.md), and [docs/configuration.md](docs/configuration.md).
 
