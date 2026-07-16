@@ -315,6 +315,9 @@ export class ConnectServer {
     const services = context.req.queries("service") ?? [];
     const query = optionalString(context.req.query("q"))?.toLowerCase();
     const providers = this.options.catalog.providers.filter((provider) => {
+      if (!provider.actions.some((action) => this.isActionVisible(action))) {
+        return false;
+      }
       if (services.length > 0 && !services.includes(provider.service)) {
         return false;
       }
@@ -333,12 +336,13 @@ export class ConnectServer {
 
   private listRuntimeActions(context: Context): Response {
     const service = optionalString(context.req.query("service"));
+    const visibleActions = this.options.catalog.actions.filter((action) => this.isActionVisible(action));
     if (!service) {
-      const services = [...new Set(this.options.catalog.actions.map((action) => action.service))];
+      const services = [...new Set(visibleActions.map((action) => action.service))];
       return writeRuntimeSuccess(context, services.map(serializeRuntimeActionService));
     }
 
-    const actions = this.options.catalog.actions.filter((action) => action.service === service);
+    const actions = visibleActions.filter((action) => action.service === service);
     return writeRuntimeSuccess(context, actions.map(serializeRuntimeAction));
   }
 
@@ -352,7 +356,10 @@ export class ConnectServer {
       });
     }
 
-    const index = await this.actionSearch.get();
+    const visibleActions = this.options.catalog.actions.filter((action) => this.isActionVisible(action));
+    const index = this.options.actionPolicy
+      ? await createActionSearchIndexProvider(visibleActions).get()
+      : await this.actionSearch.get();
     const results = searchActions(index, query.q, {
       service: query.service,
       limit: query.limit,
@@ -366,7 +373,7 @@ export class ConnectServer {
     );
     return results.flatMap((result) => {
       const action = this.options.catalog.actionsById.get(result.id);
-      if (!action) {
+      if (!action || !this.isActionVisible(action)) {
         return [];
       }
       return [serializeActionSearchResult(result, action, authenticated.has(action.service))];
@@ -375,7 +382,7 @@ export class ConnectServer {
 
   private getRuntimeAction(context: Context, actionId: string): Response {
     const action = this.options.catalog.actionsById.get(actionId);
-    if (!action) {
+    if (!action || !this.isActionVisible(action)) {
       return writeRuntimeFailure(context, {
         status: 404,
         errorCode: "invalid_input",
@@ -385,6 +392,15 @@ export class ConnectServer {
     }
 
     return writeRuntimeSuccess(context, serializeRuntimeAction(action));
+  }
+
+  private isActionVisible(action: RuntimeActionDefinition): boolean {
+    return this.options.actionPolicy?.evaluate(action).allowed !== false;
+  }
+
+  private isServiceVisible(service: string): boolean {
+    const provider = this.options.catalog.providers.find((candidate) => candidate.service === service);
+    return provider?.actions.some((action) => this.isActionVisible(action)) ?? false;
   }
 
   private async createRuntimeActionRun(context: Context, actionId: string): Promise<Response> {
@@ -552,11 +568,21 @@ export class ConnectServer {
   private async listRuntimeApps(context: Context): Promise<Response> {
     return writeRuntimeSuccess(
       context,
-      (await this.options.connections.listConnections()).map(serializeRuntimeConnectedApp),
+      (await this.options.connections.listConnections())
+        .filter((connection) => this.isServiceVisible(connection.service))
+        .map(serializeRuntimeConnectedApp),
     );
   }
 
   private async listRuntimeAppsByService(context: Context, service: string): Promise<Response> {
+    if (!this.isServiceVisible(service)) {
+      return writeRuntimeFailure(context, {
+        status: 404,
+        errorCode: "unknown_service",
+        message: `Unknown service: ${service}`,
+        meta: { service },
+      });
+    }
     try {
       return writeRuntimeSuccess(
         context,
@@ -577,8 +603,16 @@ export class ConnectServer {
   }
 
   private async listAuthenticatedRuntimeApps(context: Context): Promise<Response> {
-    const services = context.req.queries("service") ?? [];
-    return writeRuntimeSuccess(context, await this.options.connections.listAuthenticatedServices(services));
+    const requestedServices = context.req.queries("service") ?? [];
+    const visibleServices = requestedServices.filter((service) => this.isServiceVisible(service));
+    if (requestedServices.length > 0 && visibleServices.length === 0) {
+      return writeRuntimeSuccess(context, []);
+    }
+    const authenticated = await this.options.connections.listAuthenticatedServices(visibleServices);
+    return writeRuntimeSuccess(
+      context,
+      authenticated.filter((service) => this.isServiceVisible(service)),
+    );
   }
 
   private async handleMcp(context: Context): Promise<Response> {

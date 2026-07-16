@@ -2,7 +2,7 @@ import type { QueryValue } from "../core/request.ts";
 import type { ProviderFetch } from "./provider-runtime.ts";
 
 import { optionalRecord, optionalString } from "../core/cast.ts";
-import { queryParams } from "../core/request.ts";
+import { queryParams, readBoundedResponseBytes } from "../core/request.ts";
 import { providerUserAgent, ProviderRequestError } from "./provider-runtime.ts";
 
 export type ProviderRequestPhase = "validate" | "execute";
@@ -110,8 +110,17 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some((key) => key.toLowerCase() === normalized);
 }
 
-async function readJsonResponse(response: Response, providerName: string, maxResponseBytes?: number): Promise<unknown> {
-  const text = await readResponseText(response, providerName, maxResponseBytes);
+async function readJsonResponse(
+  response: Response,
+  providerName: string,
+  maxResponseBytes = 20 * 1024 * 1024,
+): Promise<unknown> {
+  const bytes = await readBoundedResponseBytes(response, {
+    maxBytes: maxResponseBytes,
+    fieldName: `${providerName} response`,
+    createError: (message) => new ProviderRequestError(413, message),
+  });
+  const text = new TextDecoder().decode(bytes);
   if (!text.trim()) {
     return null;
   }
@@ -120,48 +129,6 @@ async function readJsonResponse(response: Response, providerName: string, maxRes
   } catch {
     throw new ProviderRequestError(502, `${providerName} returned invalid JSON`);
   }
-}
-
-async function readResponseText(response: Response, providerName: string, maxResponseBytes?: number): Promise<string> {
-  if (maxResponseBytes === undefined) {
-    return response.text();
-  }
-  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
-    throw new ProviderRequestError(500, "maxResponseBytes must be a positive integer");
-  }
-
-  const contentLength = response.headers.get("content-length");
-  if (contentLength) {
-    const parsedLength = Number.parseInt(contentLength, 10);
-    if (Number.isFinite(parsedLength) && parsedLength > maxResponseBytes) {
-      throw responseSizeError(providerName, maxResponseBytes);
-    }
-  }
-
-  if (!response.body) {
-    return "";
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let totalBytes = 0;
-  let text = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    totalBytes += value.byteLength;
-    if (totalBytes > maxResponseBytes) {
-      await reader.cancel();
-      throw responseSizeError(providerName, maxResponseBytes);
-    }
-    text += decoder.decode(value, { stream: true });
-  }
-  return text + decoder.decode();
-}
-
-function responseSizeError(providerName: string, maxResponseBytes: number): ProviderRequestError {
-  return new ProviderRequestError(502, `${providerName} response exceeded ${maxResponseBytes} bytes`);
 }
 
 function createJsonRequestError(

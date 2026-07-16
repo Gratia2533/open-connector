@@ -4,33 +4,36 @@ import { s } from "../../core/json-schema.ts";
 import { defineProviderAction } from "../../core/provider-definition.ts";
 
 const service = "finmind";
-const datasetInput = s.actionInput(
+const datasetInputSchema = s.object(
+  "Input parameters for one fixed FinMind Taiwan-stock dataset.",
   {
-    stockId: s.nonEmptyString("The Taiwan stock identifier, such as 2330."),
-    startDate: s.date("The inclusive start date."),
-    endDate: s.date("The optional inclusive end date."),
+    stockId: s.nonEmptyString("Taiwan security identifier, for example 2330."),
+    startDate: s.date("Inclusive start date in YYYY-MM-DD format."),
+    endDate: s.date("Optional inclusive end date in YYYY-MM-DD format."),
   },
-  ["stockId", "startDate"],
-  "Input for one fixed FinMind stock dataset.",
+  { optional: ["endDate"] },
 );
-const datasetOutput = s.array("Rows returned by the fixed FinMind dataset.", s.unknown("One FinMind dataset row."));
+const datasetOutputSchema = s.array(
+  "Rows returned by the fixed FinMind dataset.",
+  s.unknownObject("One FinMind dataset row."),
+);
 
-const definitions = [
-  ["get_stock_prices", "Retrieve FinMind TaiwanStockPrice rows for one Taiwan stock."],
-  ["get_stock_valuation", "Retrieve FinMind TaiwanStockPER rows for one Taiwan stock."],
-  ["get_monthly_revenue", "Retrieve FinMind TaiwanStockMonthRevenue rows for one Taiwan stock."],
-  ["get_institutional_flows", "Retrieve FinMind TaiwanStockInstitutionalInvestorsBuySell rows for one Taiwan stock."],
-  ["get_financial_statements", "Retrieve FinMind TaiwanStockFinancialStatements rows for one Taiwan stock."],
-  ["get_balance_sheet", "Retrieve FinMind TaiwanStockBalanceSheet rows for one Taiwan stock."],
-  ["get_cash_flow_statement", "Retrieve FinMind TaiwanStockCashFlowsStatement rows for one Taiwan stock."],
-  ["get_margin_trading", "Retrieve FinMind TaiwanStockMarginPurchaseShortSale rows for one Taiwan stock."],
+const actionDescriptions = [
+  ["get_stock_prices", "Get historical Taiwan stock prices from FinMind."],
+  ["get_stock_valuation", "Get historical Taiwan stock valuation metrics from FinMind."],
+  ["get_monthly_revenue", "Get historical Taiwan company monthly revenue from FinMind."],
+  ["get_institutional_flows", "Get Taiwan institutional investor trading flows from FinMind."],
+  ["get_financial_statements", "Get Taiwan company income-statement rows from FinMind."],
+  ["get_balance_sheet", "Get Taiwan company balance-sheet rows from FinMind."],
+  ["get_cash_flow_statement", "Get Taiwan company cash-flow rows from FinMind."],
+  ["get_margin_trading", "Get Taiwan margin-purchase and short-sale rows from FinMind."],
 ] as const;
 
-export const finmindActions: ActionDefinition[] = definitions.map(([name, description]) =>
+export const finmindActions: ActionDefinition[] = actionDescriptions.map(([name, description]) =>
   defineProviderAction(service, {
     name,
     description,
-    inputSchema: datasetInput,
-    outputSchema: datasetOutput,
+    inputSchema: datasetInputSchema,
+    outputSchema: datasetOutputSchema,
   }),
 );

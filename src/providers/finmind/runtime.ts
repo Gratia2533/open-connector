@@ -1,162 +1,107 @@
 import type { CredentialValidationResult } from "../../core/types.ts";
 import type { ApiKeyProviderContext } from "../provider-runtime.ts";
 
-import { objectPayload, requestJson } from "../http-json-runtime.ts";
+import { optionalString, requiredString } from "../../core/cast.ts";
+import { requestJson } from "../http-json-runtime.ts";
 import { ProviderRequestError } from "../provider-runtime.ts";
 
-export const finmindApiBaseUrl = "https://api.finmindtrade.com/api/v4";
-const finmindMaxResponseBytes = 5_242_880;
+const finmindApiBaseUrl = "https://api.finmindtrade.com/api/v4";
 
-const datasets = {
-  get_stock_prices: "TaiwanStockPrice",
-  get_stock_valuation: "TaiwanStockPER",
-  get_monthly_revenue: "TaiwanStockMonthRevenue",
-  get_institutional_flows: "TaiwanStockInstitutionalInvestorsBuySell",
-  get_financial_statements: "TaiwanStockFinancialStatements",
-  get_balance_sheet: "TaiwanStockBalanceSheet",
-  get_cash_flow_statement: "TaiwanStockCashFlowsStatement",
-  get_margin_trading: "TaiwanStockMarginPurchaseShortSale",
-} as const;
+type FinMindActionContext = Pick<ApiKeyProviderContext, "apiKey" | "fetcher" | "signal">;
+type FinMindActionHandler = (input: Record<string, unknown>, context: FinMindActionContext) => Promise<unknown>;
 
-export type FinmindActionName = keyof typeof datasets;
-type FinmindActionHandler = (input: Record<string, unknown>, context: ApiKeyProviderContext) => Promise<unknown>;
+type FinMindActionName =
+  | "get_stock_prices"
+  | "get_stock_valuation"
+  | "get_monthly_revenue"
+  | "get_institutional_flows"
+  | "get_financial_statements"
+  | "get_balance_sheet"
+  | "get_cash_flow_statement"
+  | "get_margin_trading";
 
-export const finmindActionHandlers: Record<FinmindActionName, FinmindActionHandler> = Object.fromEntries(
-  Object.entries(datasets).map(([actionName, dataset]) => [
-    actionName,
-    (input: Record<string, unknown>, context: ApiKeyProviderContext) => executeDataset(dataset, input, context),
-  ]),
-) as Record<FinmindActionName, FinmindActionHandler>;
+export const finmindActionHandlers: Record<FinMindActionName, FinMindActionHandler> = {
+  get_stock_prices(input, context) {
+    return fetchDataset("TaiwanStockPrice", input, context);
+  },
+  get_stock_valuation(input, context) {
+    return fetchDataset("TaiwanStockPER", input, context);
+  },
+  get_monthly_revenue(input, context) {
+    return fetchDataset("TaiwanStockMonthRevenue", input, context);
+  },
+  get_institutional_flows(input, context) {
+    return fetchDataset("TaiwanStockInstitutionalInvestorsBuySell", input, context);
+  },
+  get_financial_statements(input, context) {
+    return fetchDataset("TaiwanStockFinancialStatements", input, context);
+  },
+  get_balance_sheet(input, context) {
+    return fetchDataset("TaiwanStockBalanceSheet", input, context);
+  },
+  get_cash_flow_statement(input, context) {
+    return fetchDataset("TaiwanStockCashFlowsStatement", input, context);
+  },
+  get_margin_trading(input, context) {
+    return fetchDataset("TaiwanStockMarginPurchaseShortSale", input, context);
+  },
+};
 
-export async function validateFinmindCredential(
-  apiKey: string,
-  fetcher: typeof fetch,
-  signal?: AbortSignal,
+export async function validateFinMindCredential(
+  input: { apiKey: string },
+  context: { fetcher: typeof fetch; signal?: AbortSignal },
 ): Promise<CredentialValidationResult> {
-  await requestDataset(
-    "TaiwanStockInfo",
-    { data_id: "2330" },
-    {
-      apiKey,
-      fetcher,
-      signal,
-    },
-  );
+  const payload = await requestJson({
+    providerName: "FinMind",
+    baseUrl: finmindApiBaseUrl,
+    path: "/data",
+    fetcher: context.fetcher,
+    signal: context.signal,
+    headers: { authorization: `Bearer ${input.apiKey}` },
+    query: { dataset: "TaiwanStockInfo", data_id: "2330" },
+    phase: "validate",
+    maxResponseBytes: 5_242_880,
+  });
+  if (!isRecord(payload) || payload.status !== 200 || !Array.isArray(payload.data)) {
+    throw new ProviderRequestError(400, "FinMind rejected the API token");
+  }
   return {
-    profile: {
-      accountId: "finmind-api-token",
-      displayName: "FinMind API Token",
-    },
+    profile: { accountId: "finmind", displayName: "FinMind API Token" },
     grantedScopes: [],
-    metadata: {
-      apiBaseUrl: finmindApiBaseUrl,
-      validationDataset: "TaiwanStockInfo",
-    },
+    metadata: { apiBaseUrl: finmindApiBaseUrl, validationDataset: "TaiwanStockInfo" },
   };
 }
 
-async function executeDataset(
-  dataset: (typeof datasets)[FinmindActionName],
-  input: Record<string, unknown>,
-  context: ApiKeyProviderContext,
-): Promise<unknown> {
-  const startDate = readRequiredString(input, "startDate");
-  const endDate = readOptionalString(input.endDate);
-  validateDateRange(startDate, endDate, 3_660);
-  return requestDataset(
-    dataset,
-    {
-      data_id: readRequiredString(input, "stockId"),
-      start_date: startDate,
-      end_date: endDate,
-    },
-    context,
-  );
-}
-
-async function requestDataset(
+async function fetchDataset(
   dataset: string,
-  query: Record<string, string | undefined>,
-  context: ApiKeyProviderContext,
+  input: Record<string, unknown>,
+  context: FinMindActionContext,
 ): Promise<unknown[]> {
-  const payload = objectPayload(
-    await requestJson({
-      providerName: "FinMind",
-      baseUrl: finmindApiBaseUrl,
-      path: "/data",
-      fetcher: context.fetcher,
-      signal: context.signal,
-      headers: { authorization: `Bearer ${context.apiKey}` },
-      query: { dataset, ...query },
-      maxResponseBytes: finmindMaxResponseBytes,
-    }),
-    `FinMind ${dataset}`,
-  );
-  if (payload.status !== 200) {
-    const message = readOptionalString(payload.msg) ?? `FinMind ${dataset} request failed`;
-    throw new ProviderRequestError(mapFinmindStatus(payload.status, message), message, payload);
-  }
-  if (!Array.isArray(payload.data)) {
-    throw new ProviderRequestError(502, `FinMind ${dataset} data must be an array`, payload);
+  const payload = await requestJson({
+    providerName: "FinMind",
+    baseUrl: finmindApiBaseUrl,
+    path: "/data",
+    fetcher: context.fetcher,
+    signal: context.signal,
+    headers: { authorization: `Bearer ${context.apiKey}` },
+    query: {
+      dataset,
+      data_id: requiredInputString(input.stockId, "stockId"),
+      start_date: requiredInputString(input.startDate, "startDate"),
+      end_date: optionalString(input.endDate),
+    },
+    maxResponseBytes: 5_242_880,
+  });
+  if (!isRecord(payload) || payload.status !== 200 || !Array.isArray(payload.data)) {
+    throw new ProviderRequestError(502, "FinMind returned an invalid dataset response");
   }
   return payload.data;
 }
 
-function mapFinmindStatus(status: unknown, message: string): number {
-  if (status === 401 || status === 402 || status === 403) {
-    return 401;
-  }
-  if (status === 429) {
-    return 429;
-  }
-  if (status === 400 || status === 404 || status === 422) {
-    return 400;
-  }
-  const lowered = message.toLowerCase();
-  if (lowered.includes("rate") || lowered.includes("limit") || lowered.includes("quota")) {
-    return 429;
-  }
-  if (lowered.includes("token") || lowered.includes("auth")) {
-    return 401;
-  }
-  return 502;
+function requiredInputString(value: unknown, fieldName: string): string {
+  return requiredString(value, fieldName, (message) => new ProviderRequestError(400, message));
 }
 
-function validateDateRange(startDate: string, endDate: string | undefined, maxDays: number): void {
-  const start = parseIsoDate(startDate, "startDate");
-  const effectiveEnd = endDate ?? new Date().toISOString().slice(0, 10);
-  const end = parseIsoDate(effectiveEnd, "endDate");
-  const dayMs = 24 * 60 * 60 * 1_000;
-  if (start > end) {
-    throw new ProviderRequestError(400, "startDate must not be after endDate");
-  }
-  if ((end - start) / dayMs > maxDays) {
-    throw new ProviderRequestError(400, `date range must not exceed ${maxDays} days`);
-  }
-  if (end > Date.now() + dayMs) {
-    throw new ProviderRequestError(400, "endDate must not be in the future");
-  }
-}
-
-function parseIsoDate(value: string, fieldName: string): number {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    throw new ProviderRequestError(400, `${fieldName} must use YYYY-MM-DD`);
-  }
-  const parsed = Date.parse(`${value}T00:00:00Z`);
-  if (!Number.isFinite(parsed) || new Date(parsed).toISOString().slice(0, 10) !== value) {
-    throw new ProviderRequestError(400, `${fieldName} must be a valid date`);
-  }
-  return parsed;
-}
-
-function readRequiredString(input: Record<string, unknown>, key: string): string {
-  const value = readOptionalString(input[key]);
-  if (!value) {
-    throw new ProviderRequestError(400, `${key} is required`);
-  }
-  return value;
-}
-
-function readOptionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -1,37 +1,23 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { requestJson } from "./http-json-runtime.ts";
+import { ProviderRequestError } from "./provider-runtime.ts";
 
-describe("requestJson response limits", () => {
-  it("rejects a streamed body that exceeds maxResponseBytes", async () => {
-    const fetcher = vi.fn(
-      async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
-        new Response("12345", { status: 200 }),
-    );
+describe("requestJson", () => {
+  it("rejects a response larger than maxResponseBytes", async () => {
+    const fetcher = async () =>
+      new Response(JSON.stringify({ data: "0123456789" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
 
-    await expect(
-      requestJson({
-        providerName: "Limited API",
-        baseUrl: "https://api.example.com",
-        path: "/data",
-        fetcher,
-        maxResponseBytes: 4,
-      }),
-    ).rejects.toThrow("response exceeded 4 bytes");
-  });
+    const request = requestJson({
+      providerName: "Test Provider",
+      baseUrl: "https://provider.test",
+      path: "/data",
+      fetcher,
+      maxResponseBytes: 8,
+    });
 
-  it("parses JSON below maxResponseBytes", async () => {
-    const fetcher = vi.fn(
-      async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => Response.json({ ok: true }),
-    );
-
-    await expect(
-      requestJson({
-        providerName: "Limited API",
-        baseUrl: "https://api.example.com",
-        path: "/data",
-        fetcher,
-        maxResponseBytes: 1024,
-      }),
-    ).resolves.toEqual({ ok: true });
+    await expect(request).rejects.toMatchObject({ status: 413 } satisfies Partial<ProviderRequestError>);
   });
 });

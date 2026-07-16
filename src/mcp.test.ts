@@ -8,6 +8,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it } from "vitest";
 import { createCatalogStore } from "./catalog-store.ts";
 import { ConnectionService } from "./connection-service.ts";
+import { ActionPolicyService } from "./core/action-policy.ts";
 import { createMcpServer } from "./mcp.ts";
 import { ActionRunner } from "./server/actions/action-runner.ts";
 
@@ -36,6 +37,21 @@ const exampleProvider: ProviderDefinition = {
   authTypes: ["no_auth"],
   auth: [{ type: "no_auth" }],
   actions: [echoAction],
+};
+
+const hiddenAction: ActionDefinition = {
+  ...echoAction,
+  id: "hidden.secret",
+  service: "hidden",
+  name: "secret",
+  description: "Must not be discoverable when policy blocks it.",
+};
+
+const hiddenProvider: ProviderDefinition = {
+  ...exampleProvider,
+  service: "hidden",
+  displayName: "Hidden",
+  actions: [hiddenAction],
 };
 
 describe("MCP server", () => {
@@ -128,11 +144,41 @@ describe("MCP server", () => {
       });
     });
   });
+
+  it("hides actions and providers excluded by local policy", async () => {
+    await withMcpClient(
+      async (client) => {
+        const apps = await client.callTool({ name: "list_apps", arguments: {} });
+        const search = await client.callTool({
+          name: "search_actions",
+          arguments: { query: "secret", limit: 10 },
+        });
+        const guide = await client.callTool({
+          name: "get_action_guide",
+          arguments: { actionId: "hidden.secret" },
+        });
+
+        expect(apps.structuredContent).toMatchObject({
+          ok: true,
+          data: [{ service: "example", actionCount: 1 }],
+        });
+        expect(search.structuredContent).toEqual({ ok: true, data: [] });
+        expect(guide.structuredContent).toMatchObject({
+          ok: false,
+          error: { code: "unknown_action" },
+        });
+      },
+      new ActionPolicyService({ allowedActions: ["example.echo"] }),
+    );
+  });
 });
 
-async function withMcpClient(run: (client: Client) => Promise<void>): Promise<void> {
-  const catalog = createCatalogStore([exampleProvider], {
-    executableActionIds: ["example.echo"],
+async function withMcpClient(
+  run: (client: Client) => Promise<void>,
+  actionPolicy?: ActionPolicyService,
+): Promise<void> {
+  const catalog = createCatalogStore([exampleProvider, hiddenProvider], {
+    executableActionIds: ["example.echo", "hidden.secret"],
   });
   const providerLoader = new EchoProviderLoader();
   const connections = new ConnectionService({
@@ -151,6 +197,7 @@ async function withMcpClient(run: (client: Client) => Promise<void>): Promise<vo
     providerLoader,
     connections,
     actions,
+    actionPolicy,
   });
   const client = new Client({ name: "mcp-test", version: "0.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

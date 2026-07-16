@@ -1,25 +1,37 @@
-# Runs the prebuilt image published to GHCR. To build from source instead, add
-# the build overlay: docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 services:
   connector:
-    image: ghcr.io/oomol-lab/open-connector:latest
+    image: open-connector-stock:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
     ports:
-      - "3000:3000"
-    volumes:
-      - connector-data:/app/data
+      - "127.0.0.1:8001:3000"
     environment:
-      OOMOL_CONNECT_DATA_DIR: /app/data
-      OOMOL_CONNECT_ORIGIN:
-      OOMOL_CONNECT_ENCRYPTION_KEY:
-      OOMOL_CONNECT_ADMIN_TOKEN:
-      OOMOL_CONNECT_RUNTIME_TOKEN:
-      OOMOL_CONNECT_JWKS_URI:
-      OOMOL_CONNECT_JWT_ISSUER:
-      OOMOL_CONNECT_JWT_AUDIENCE:
-      OOMOL_CONNECT_ALLOWED_ACTIONS:
-      OOMOL_CONNECT_BLOCKED_ACTIONS:
-      OOMOL_CONNECT_ALLOWED_PROXIES:
-      OOMOL_CONNECT_BLOCKED_PROXIES:
-
-volumes:
-  connector-data:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      OOMOL_CONNECT_ORIGIN: "http://127.0.0.1:8001"
+      OOMOL_CONNECT_DATA_DIR: "/app/data"
+      OOMOL_CONNECT_ADMIN_TOKEN: "${OOMOL_CONNECT_ADMIN_TOKEN:?set OOMOL_CONNECT_ADMIN_TOKEN}"
+      OOMOL_CONNECT_RUNTIME_TOKEN: "${OOMOL_CONNECT_RUNTIME_TOKEN:?set OOMOL_CONNECT_RUNTIME_TOKEN}"
+      OOMOL_CONNECT_ENCRYPTION_KEY: "${OOMOL_CONNECT_ENCRYPTION_KEY:?set OOMOL_CONNECT_ENCRYPTION_KEY}"
+      OOMOL_CONNECT_ALLOWED_ACTIONS: >-
+        finmind.get_stock_prices,
+        finmind.get_stock_valuation,
+        finmind.get_monthly_revenue,
+        finmind.get_institutional_flows,
+        finmind.get_financial_statements,
+        finmind.get_balance_sheet,
+        finmind.get_cash_flow_statement,
+        finmind.get_margin_trading,
+        finnhub.search_symbols,
+        finnhub.get_quote,
+        finnhub.get_company_profile,
+        finnhub.get_basic_financials,
+        finnhub.get_financial_reports,
+        finnhub.get_stock_candles,
+        finnhub.get_company_news
+      OOMOL_CONNECT_ALLOWED_PROXIES: ""
+      OOMOL_CONNECT_BLOCKED_PROXIES: "*"
+    volumes:
+      - ./data:/app/data
