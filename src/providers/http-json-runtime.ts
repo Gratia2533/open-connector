@@ -2,7 +2,7 @@ import type { QueryValue } from "../core/request.ts";
 import type { ProviderFetch } from "./provider-runtime.ts";
 
 import { optionalRecord, optionalString } from "../core/cast.ts";
-import { queryParams } from "../core/request.ts";
+import { queryParams, readBoundedResponseBytes } from "../core/request.ts";
 import { providerUserAgent, ProviderRequestError } from "./provider-runtime.ts";
 
 export type ProviderRequestPhase = "validate" | "execute";
@@ -18,6 +18,7 @@ export interface JsonRequestOptions {
   query?: Record<string, QueryValue>;
   body?: unknown;
   phase?: ProviderRequestPhase;
+  maxResponseBytes?: number;
 }
 
 export async function requestJson(input: JsonRequestOptions): Promise<unknown> {
@@ -30,7 +31,7 @@ export async function requestJson(input: JsonRequestOptions): Promise<unknown> {
       body: input.body === undefined ? undefined : JSON.stringify(input.body),
       signal: input.signal,
     });
-    payload = await readJsonResponse(response, input.providerName);
+    payload = await readJsonResponse(response, input.providerName, input.maxResponseBytes);
   } catch (error) {
     if (error instanceof ProviderRequestError) {
       throw error;
@@ -109,8 +110,17 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some((key) => key.toLowerCase() === normalized);
 }
 
-async function readJsonResponse(response: Response, providerName: string): Promise<unknown> {
-  const text = await response.text();
+async function readJsonResponse(
+  response: Response,
+  providerName: string,
+  maxResponseBytes = 20 * 1024 * 1024,
+): Promise<unknown> {
+  const bytes = await readBoundedResponseBytes(response, {
+    maxBytes: maxResponseBytes,
+    fieldName: `${providerName} response`,
+    createError: (message) => new ProviderRequestError(413, message),
+  });
+  const text = new TextDecoder().decode(bytes);
   if (!text.trim()) {
     return null;
   }
