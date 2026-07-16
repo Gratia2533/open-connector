@@ -128,52 +128,31 @@ run `npm run deploy:cloudflare`.
 
 ## Quick Start
 
-Start the runtime from the published image with Docker Compose:
+This branch's Compose file is a dedicated stock-provider deployment. It builds the local source, binds only to `127.0.0.1:8001`, allows the 15 curated FinMind/Finnhub actions, and blocks every generic provider proxy. Compose fails closed unless all three runtime secrets are supplied.
+
+Create a private local `.env` without placing secret values in shell history:
 
 ```bash
-docker compose up
+umask 077
+{
+  printf 'OOMOL_CONNECT_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)"
+  printf 'OOMOL_CONNECT_RUNTIME_TOKEN=%s\n' "$(openssl rand -hex 32)"
+  printf 'OOMOL_CONNECT_ENCRYPTION_KEY=%s\n' "$(openssl rand -base64 32)"
+} > .env
+docker compose up --build -d
+curl -fsS http://127.0.0.1:8001/health
 ```
 
-This pulls `ghcr.io/oomol-lab/open-connector:latest`. To build from source instead:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
-```
-
-Open the local console and generated API reference:
+Open the loopback-only console and generated API reference:
 
 ```text
-http://localhost:3000
-http://localhost:3000/docs
+http://127.0.0.1:8001
+http://127.0.0.1:8001/docs
 ```
 
-Run a no-auth Action to verify the runtime:
+Add FinMind and Finnhub credentials through the local console or another local hidden-input onboarding flow. Never put upstream tokens in Compose YAML, Git, command-line arguments, or chat. Runtime callers receive only `OOMOL_CONNECT_RUNTIME_TOKEN` and can execute only actions present in `OOMOL_CONNECT_ALLOWED_ACTIONS`.
 
-```bash
-curl -s -X POST http://localhost:3000/v1/actions/hackernews.get_top_stories \
-  -H 'content-type: application/json' \
-  -d '{"input":{}}'
-```
-
-See [docs/quickstart.md](docs/quickstart.md) for the full local setup, first provider connection,
-OAuth flow, and runtime settings.
-
-## Connect a Provider
-
-GitHub is the simplest credentialed example because it can use a personal access token:
-
-```bash
-curl -s -X PUT http://localhost:3000/api/connections/github \
-  -H 'content-type: application/json' \
-  -d '{"authType":"api_key","values":{"apiKey":"github_pat_..."}}'
-
-curl -s -X POST http://localhost:3000/v1/actions/github.get_current_user \
-  -H 'content-type: application/json' \
-  -d '{"input":{}}'
-```
-
-For OAuth2 apps, named connections, credential encryption, token refresh, and action policies, see
-[docs/credentials.md](docs/credentials.md) and [docs/configuration.md](docs/configuration.md).
+For the generic upstream development workflow, OAuth, named connections, credential encryption, token refresh, and action policy details, see [docs/quickstart.md](docs/quickstart.md), [docs/credentials.md](docs/credentials.md), and [docs/configuration.md](docs/configuration.md).
 
 ## Web Console
 
