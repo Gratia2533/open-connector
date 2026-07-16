@@ -14,7 +14,7 @@ import {
   requiredString,
 } from "../../core/cast.ts";
 import { assertPublicHttpUrl, readBoundedResponseBytes } from "../../core/request.ts";
-import { providerUserAgent, ProviderRequestError, readTransitFileInput } from "../provider-runtime.ts";
+import { providerFetch, providerUserAgent, ProviderRequestError, readTransitFileInput } from "../provider-runtime.ts";
 
 const maxMediaUploadSourceBytes = 20 * 1024 * 1024;
 
@@ -749,9 +749,11 @@ async function resolveMediaUploadSource(
 }
 
 async function downloadSourceBytes(sourceUrl: string, context: WooCommerceCredentialContext): Promise<Uint8Array> {
-  const response = await context.fetcher(sourceUrl, {
+  const response = await providerFetch(sourceUrl, {
     method: "GET",
-    redirect: "error",
+    // Workers has no "error" redirect mode; "manual" never follows either, and
+    // the !response.ok check below rejects any 3xx.
+    redirect: "manual",
     signal: context.signal,
   });
   if (!response.ok) throw new ProviderRequestError(502, `failed to fetch upload source: ${response.status}`);

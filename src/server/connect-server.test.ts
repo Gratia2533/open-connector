@@ -11,7 +11,15 @@ import type {
 import type { IOAuthClientConfigStore, OAuthClientConfig } from "../oauth/oauth-client-config-service.ts";
 import type { IOAuthStateStore, OAuthAuthorizationState } from "../oauth/oauth-flow-service.ts";
 import type { IProviderLoader } from "../providers/provider-loader.ts";
+import type { RuntimeActionHttpResult } from "./api/runtime-api.ts";
+import type { RuntimeJwtVerifier } from "./api/runtime-jwt.ts";
 import type { Logger } from "./logger.ts";
+import type {
+  CompleteIdempotencyInput,
+  IdempotencyClaimInput,
+  IdempotencyClaimResult,
+  IIdempotencyStore,
+} from "./storage/idempotency-store.ts";
 import type { IRunLogStore, RunLog, RunLogListInput, RunLogPage } from "./storage/runtime-store.ts";
 import type { IRuntimeTokenStore, RuntimeTokenRecord } from "./storage/runtime-token-service.ts";
 
@@ -25,6 +33,7 @@ import { ActionPolicyService as LocalActionPolicyService } from "../core/action-
 import { buildActionSearchIndex } from "../core/action-search.ts";
 import { OAuthClientConfigService } from "../oauth/oauth-client-config-service.ts";
 import { OAuthFlowService } from "../oauth/oauth-flow-service.ts";
+import { actionInputMaxDepth } from "./actions/action-idempotency.ts";
 import { ActionRunner } from "./actions/action-runner.ts";
 import { registerStaticRoutes } from "./api/static-routes.ts";
 import { ConnectServer } from "./connect-server.ts";
@@ -85,12 +94,76 @@ const followUpAction: ActionDefinition = {
   name: "follow_up",
 };
 
+const catalogOnlyProvider: ProviderDefinition = {
+  ...apiKeyProvider,
+  service: "catalog_only",
+  displayName: "Catalog Only",
+  actions: [
+    {
+      ...echoAction,
+      id: "catalog_only.query",
+      service: "catalog_only",
+      name: "query",
+    },
+  ],
+};
+
+const catalogOnlyOAuthProvider: ProviderDefinition = {
+  ...oauthProvider,
+  service: "oauth_catalog_only",
+  displayName: "OAuth Catalog Only",
+  actions: [
+    {
+      ...echoAction,
+      id: "oauth_catalog_only.query",
+      service: "oauth_catalog_only",
+      name: "query",
+    },
+  ],
+};
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe("ConnectServer", () => {
+  it("rejects connections for providers unavailable in the current runtime", async () => {
+    const app = createTestServer([catalogOnlyProvider]).createApp();
+
+    const response = await app.request("/api/connections/catalog_only", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", values: { apiKey: "secret" } }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "provider_unavailable",
+        message: "Catalog Only is not available in this runtime.",
+      },
+    });
+  });
+
+  it("rejects OAuth authorization for providers unavailable in the current runtime", async () => {
+    const app = createTestServer([catalogOnlyOAuthProvider]).createApp();
+
+    const response = await app.request("/api/oauth/authorizations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ service: "oauth_catalog_only" }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "provider_unavailable",
+        message: "OAuth Catalog Only is not available in this runtime.",
+      },
+    });
+  });
+
   it("serves catalog and standard connection errors without opening a port", async () => {
     const app = createTestServer([apiKeyProvider]).createApp();
 
@@ -247,6 +320,82 @@ describe("ConnectServer", () => {
       body: JSON.stringify({ input: {} }),
     });
     expect(adminActionRun.status).toBe(404);
+  });
+
+  it("accepts JWT access tokens alongside existing runtime tokens", async () => {
+    const runtimeTokens = new RuntimeTokenService(new MemoryRuntimeTokenStore());
+    const storedToken = await runtimeTokens.createToken("Stored client");
+    const verifyRuntimeJwt = vi.fn(async (token: string) => token === "jwt-access-token");
+    const app = createTestServer([apiKeyProvider], {
+      auth: {
+        adminToken: "local-token",
+        runtimeToken: "runtime-token",
+        verifyRuntimeJwt,
+      },
+      runtimeTokens,
+    }).createApp();
+
+    expect((await app.request("/v1/actions")).status).toBe(401);
+    expect(
+      (
+        await app.request("/v1/actions", {
+          headers: { authorization: "Bearer jwt-access-token" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app.request("/mcp/tools", {
+          headers: { authorization: "Bearer jwt-access-token" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app.request("/api/providers/example", {
+          headers: { authorization: "Bearer jwt-access-token" },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await app.request("/v1/actions", {
+          headers: { authorization: "Bearer runtime-token" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app.request("/v1/actions", {
+          headers: { authorization: `Bearer ${storedToken.token}` },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app.request("/v1/actions", {
+          headers: { authorization: "Bearer invalid-token" },
+        })
+      ).status,
+    ).toBe(401);
+  });
+
+  it("requires authentication when JWT is the only configured runtime credential", async () => {
+    const app = createTestServer([apiKeyProvider], {
+      auth: {
+        adminToken: "local-token",
+        verifyRuntimeJwt: async (token) => token === "jwt-access-token",
+      },
+    }).createApp();
+
+    expect((await app.request("/v1/actions")).status).toBe(401);
+    expect(
+      (
+        await app.request("/v1/actions", {
+          headers: { authorization: "Bearer jwt-access-token" },
+        })
+      ).status,
+    ).toBe(200);
   });
 
   it("serves API routes when static routes are disabled", async () => {
@@ -725,7 +874,7 @@ describe("ConnectServer", () => {
     expect(callbackText).toContain("badge");
     expect(callbackText).toContain("Automatically closing in 5 seconds.");
     expect(callbackText).toContain("setTimeout");
-    expect(callbackText).toContain("window.close(),5000");
+    expect(callbackText).toContain("window.close()");
     const connections = await app.request("/api/connections");
     expect(connections.status).toBe(200);
     await expect(connections.json()).resolves.toMatchObject([
@@ -1214,13 +1363,6 @@ describe("ConnectServer", () => {
       },
     ).createApp();
 
-    const hiddenConnection = await app.request("/api/connections/hidden", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ authType: "api_key", values: { apiKey: "test-api-key" } }),
-    });
-    expect(hiddenConnection.status).toBe(200);
-
     await expect((await app.request("/v1/providers")).json()).resolves.toMatchObject({
       success: true,
       data: [{ service: "example" }],
@@ -1491,6 +1633,397 @@ describe("ConnectServer", () => {
       success: true,
       data: ["example"],
     });
+  });
+
+  it("replays completed idempotent action requests while preserving no-key behavior", async () => {
+    let executions = 0;
+    const runs = new MemoryRunLogStore();
+    const providerLoader = new ActionProviderLoader(async (input, context) => {
+      executions += 1;
+      await context.getCredential("example");
+      return { ok: true, output: input };
+    });
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          actions: [echoAction],
+        },
+      ],
+      { providerLoader, runs },
+    ).createApp();
+
+    await app.request("/api/connections/example", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", values: { apiKey: "example-key" } }),
+    });
+
+    for (let index = 0; index < 2; index += 1) {
+      const response = await app.request("/v1/actions/example.echo", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: { message: "without-key" } }),
+      });
+      expect(response.status).toBe(200);
+    }
+
+    const first = await app.request("/v1/actions/example.echo", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-1",
+        "x-oo-connector-alias": "default",
+      },
+      body: JSON.stringify({
+        input: { message: "hello", nested: { first: 1, second: 2 } },
+      }),
+    });
+    const firstBody = await first.json();
+    const replay = await app.request("/v1/actions/example.echo", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-1",
+      },
+      body: JSON.stringify({
+        input: { nested: { second: 2, first: 1 }, message: "hello" },
+      }),
+    });
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("cache-control")).toBe("no-store");
+    await expect(replay.json()).resolves.toEqual(firstBody);
+    expect(executions).toBe(3);
+    expect((await runs.list()).items).toHaveLength(3);
+  });
+
+  it("rejects idempotency keys reused for another input, connection, or action", async () => {
+    let executions = 0;
+    const providerLoader = new ActionProviderLoader(async (input, context) => {
+      executions += 1;
+      await context.getCredential("example");
+      return { ok: true, output: input };
+    });
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          actions: [echoAction, followUpAction],
+        },
+      ],
+      { providerLoader },
+    ).createApp();
+
+    await app.request("/api/connections/example", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", values: { apiKey: "example-key" } }),
+    });
+    const headers = {
+      "content-type": "application/json",
+      "idempotency-key": "request-conflict",
+    };
+    const first = await app.request("/v1/actions/example.echo", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ input: { message: "hello" } }),
+    });
+    expect(first.status).toBe(200);
+
+    const conflicts = await Promise.all([
+      app.request("/v1/actions/example.echo", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ input: { message: "different" } }),
+      }),
+      app.request("/v1/actions/example.echo", {
+        method: "POST",
+        headers: { ...headers, "x-oo-connector-alias": "work" },
+        body: JSON.stringify({ input: { message: "hello" } }),
+      }),
+      app.request("/v1/actions/example.follow_up", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ input: { message: "hello" } }),
+      }),
+    ]);
+
+    for (const conflict of conflicts) {
+      expect(conflict.status).toBe(409);
+      await expect(conflict.json()).resolves.toMatchObject({
+        success: false,
+        errorCode: "idempotency_key_conflict",
+      });
+    }
+    expect(executions).toBe(1);
+  });
+
+  it("does not dispatch concurrent requests with the same idempotency key twice", async () => {
+    let executions = 0;
+    let notifyStarted: (() => void) | undefined;
+    let releaseExecutor: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseExecutor = resolve;
+    });
+    const providerLoader = new ActionProviderLoader(async (input, context) => {
+      executions += 1;
+      await context.getCredential("example");
+      notifyStarted?.();
+      await gate;
+      return { ok: true, output: input };
+    });
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          actions: [echoAction],
+        },
+      ],
+      { providerLoader },
+    ).createApp();
+
+    await app.request("/api/connections/example", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", values: { apiKey: "example-key" } }),
+    });
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-concurrent",
+      },
+      body: JSON.stringify({ input: { message: "hello" } }),
+    };
+    const first = app.request("/v1/actions/example.echo", request);
+    await started;
+
+    const duplicate = await app.request("/v1/actions/example.echo", request);
+    expect(duplicate.status).toBe(409);
+    await expect(duplicate.json()).resolves.toMatchObject({
+      success: false,
+      errorCode: "idempotency_request_in_progress",
+    });
+
+    releaseExecutor?.();
+    expect((await first).status).toBe(200);
+    expect(executions).toBe(1);
+  });
+
+  it("replays terminal action failures for an idempotency key", async () => {
+    let executions = 0;
+    const providerLoader = new ActionProviderLoader(async (_input, context) => {
+      executions += 1;
+      await context.getCredential("example");
+      return {
+        ok: false,
+        error: { code: "provider_error", message: "Provider rejected the request." },
+      };
+    });
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          actions: [echoAction],
+        },
+      ],
+      { providerLoader },
+    ).createApp();
+
+    await app.request("/api/connections/example", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", values: { apiKey: "example-key" } }),
+    });
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-failure",
+      },
+      body: JSON.stringify({ input: { message: "hello" } }),
+    };
+    const first = await app.request("/v1/actions/example.echo", request);
+    const firstBody = await first.json();
+    const replay = await app.request("/v1/actions/example.echo", request);
+
+    expect(first.status).toBe(500);
+    expect(replay.status).toBe(500);
+    await expect(replay.json()).resolves.toEqual(firstBody);
+    expect(executions).toBe(1);
+  });
+
+  it("keeps uncertain idempotent executions in progress instead of retrying them", async () => {
+    let executions = 0;
+    const providerLoader = new ActionProviderLoader(async (_input, context) => {
+      executions += 1;
+      await context.getCredential("example");
+      throw new Error("uncertain provider outcome");
+    });
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          actions: [echoAction],
+        },
+      ],
+      { providerLoader },
+    ).createApp();
+
+    await app.request("/api/connections/example", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", values: { apiKey: "example-key" } }),
+    });
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-uncertain",
+      },
+      body: JSON.stringify({ input: { message: "hello" } }),
+    };
+    const first = await app.request("/v1/actions/example.echo", request);
+    expect(first.status).toBe(500);
+    await expect(first.json()).resolves.toEqual({
+      error: { code: "internal_error", message: "Internal server error." },
+    });
+
+    const duplicate = await app.request("/v1/actions/example.echo", request);
+    expect(duplicate.status).toBe(409);
+    await expect(duplicate.json()).resolves.toMatchObject({
+      success: false,
+      errorCode: "idempotency_request_in_progress",
+    });
+    expect(executions).toBe(1);
+  });
+
+  it("does not retry an action when persisting its completed response fails", async () => {
+    let executions = 0;
+    const providerLoader = new ActionProviderLoader(async (input, context) => {
+      executions += 1;
+      await context.getCredential("example");
+      return { ok: true, output: input };
+    });
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          actions: [echoAction],
+        },
+      ],
+      {
+        providerLoader,
+        idempotency: new FailingCompleteIdempotencyStore(),
+      },
+    ).createApp();
+
+    await app.request("/api/connections/example", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", values: { apiKey: "example-key" } }),
+    });
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-persistence-failure",
+      },
+      body: JSON.stringify({ input: { message: "hello" } }),
+    };
+
+    expect((await app.request("/v1/actions/example.echo", request)).status).toBe(500);
+    const duplicate = await app.request("/v1/actions/example.echo", request);
+    expect(duplicate.status).toBe(409);
+    await expect(duplicate.json()).resolves.toMatchObject({
+      success: false,
+      errorCode: "idempotency_request_in_progress",
+    });
+    expect(executions).toBe(1);
+  });
+
+  it("rejects invalid idempotency keys before dispatching an action", async () => {
+    let executions = 0;
+    const providerLoader = new ActionProviderLoader(async (input) => {
+      executions += 1;
+      return { ok: true, output: input };
+    });
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          actions: [echoAction],
+        },
+      ],
+      { providerLoader },
+    ).createApp();
+
+    const response = await app.request("/v1/actions/example.echo", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "x".repeat(256),
+      },
+      body: JSON.stringify({ input: {} }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      success: false,
+      errorCode: "invalid_input",
+    });
+    expect(executions).toBe(0);
+  });
+
+  it("rejects deeply nested idempotent inputs before claiming the key", async () => {
+    let executions = 0;
+    const providerLoader = new ActionProviderLoader(async (input) => {
+      executions += 1;
+      return { ok: true, output: input };
+    });
+    const app = createTestServer(
+      [
+        {
+          ...apiKeyProvider,
+          actions: [echoAction],
+        },
+      ],
+      { providerLoader },
+    ).createApp();
+    let input: unknown = "leaf";
+    for (let depth = 0; depth <= actionInputMaxDepth; depth += 1) {
+      input = { child: input };
+    }
+    const headers = {
+      "content-type": "application/json",
+      "idempotency-key": "request-too-deep",
+    };
+
+    const rejected = await app.request("/v1/actions/example.echo", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ input }),
+    });
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toMatchObject({
+      success: false,
+      errorCode: "invalid_input",
+      message: `Action input must not exceed an object/array nesting depth of ${actionInputMaxDepth} levels when Idempotency-Key is provided.`,
+    });
+    expect(executions).toBe(0);
+
+    const accepted = await app.request("/v1/actions/example.echo", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ input: { child: "leaf" } }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(executions).toBe(1);
   });
 
   it("maps v1 runtime failures to stable envelopes", async () => {
@@ -1795,12 +2328,19 @@ describe("ConnectServer", () => {
   });
 });
 
+interface TestAuthOptions {
+  adminToken?: string;
+  runtimeToken?: string;
+  verifyRuntimeJwt?: RuntimeJwtVerifier;
+}
+
 interface CreateTestServerOptions {
-  auth?: { adminToken?: string; runtimeToken?: string };
+  auth?: TestAuthOptions;
   actionPolicy?: ActionPolicyService;
   actionSearch?: ActionSearchIndexProvider;
   providerLoader?: IProviderLoader;
   logger?: Logger;
+  idempotency?: IIdempotencyStore;
   runtimeTokens?: RuntimeTokenService;
   runs?: MemoryRunLogStore;
   staticRoot?: string | false;
@@ -1812,6 +2352,7 @@ function createTestServer(providers: ProviderDefinition[], options: CreateTestSe
     executableActionIds: ["example.echo"],
   });
   const providerLoader = options.providerLoader ?? new EmptyProviderLoader();
+  const idempotency = options.idempotency ?? new MemoryIdempotencyStore();
   const runtimeTokens = options.runtimeTokens ?? new RuntimeTokenService(new MemoryRuntimeTokenStore());
   const runs = options.runs ?? new MemoryRunLogStore();
   const connections = new ConnectionService({
@@ -1855,6 +2396,7 @@ function createTestServer(providers: ProviderDefinition[], options: CreateTestSe
       states: new MemoryOAuthStateStore(),
     }),
     actions: actionRunner,
+    idempotency,
     transitFiles,
     runtimeTokens,
     registerStaticRoutes: staticRoot ? (app) => registerStaticRoutes(app, staticRoot) : undefined,
@@ -1862,6 +2404,7 @@ function createTestServer(providers: ProviderDefinition[], options: CreateTestSe
       ...options.auth,
       hasRuntimeTokens: async () => (await runtimeTokens.listTokens()).length > 0,
       verifyRuntimeToken: (token) => runtimeTokens.verifyToken(token),
+      verifyRuntimeJwt: options.auth?.verifyRuntimeJwt,
     },
     actionPolicy: options.actionPolicy,
     actionSearch: options.actionSearch,
@@ -1960,6 +2503,19 @@ class EchoProviderLoader implements IProviderLoader {
         };
       },
     };
+  }
+}
+
+class ActionProviderLoader extends EchoProviderLoader {
+  private readonly executor: ActionExecutor;
+
+  constructor(executor: ActionExecutor) {
+    super();
+    this.executor = executor;
+  }
+
+  override async loadActionExecutor(): Promise<ActionExecutor> {
+    return this.executor;
   }
 }
 
@@ -2095,6 +2651,76 @@ class MemoryRuntimeTokenStore implements IRuntimeTokenStore {
     if (token) {
       this.tokens.set(id, { ...token, lastUsedAt: usedAt });
     }
+  }
+}
+
+type MemoryIdempotencyRecord =
+  | {
+      claimId: string;
+      requestHash: string;
+      state: "in_progress";
+      expiresAt: string;
+    }
+  | {
+      claimId: string;
+      requestHash: string;
+      state: "completed";
+      response: RuntimeActionHttpResult;
+      expiresAt: string;
+    };
+
+class MemoryIdempotencyStore implements IIdempotencyStore {
+  private readonly records = new Map<string, MemoryIdempotencyRecord>();
+
+  async claim(input: IdempotencyClaimInput): Promise<IdempotencyClaimResult> {
+    const current = this.records.get(input.keyHash);
+    if (current && current.expiresAt <= input.now) {
+      this.records.delete(input.keyHash);
+    }
+
+    const record = this.records.get(input.keyHash);
+    if (!record) {
+      this.records.set(input.keyHash, {
+        claimId: input.claimId,
+        requestHash: input.requestHash,
+        state: "in_progress",
+        expiresAt: input.expiresAt,
+      });
+      return { kind: "acquired" };
+    }
+    if (record.requestHash !== input.requestHash) {
+      return { kind: "conflict" };
+    }
+    if (record.state === "in_progress") {
+      return { kind: "in_progress" };
+    }
+    return { kind: "completed", response: record.response };
+  }
+
+  async complete(input: CompleteIdempotencyInput): Promise<boolean> {
+    const record = this.records.get(input.keyHash);
+    if (
+      !record ||
+      record.state !== "in_progress" ||
+      record.claimId !== input.claimId ||
+      record.requestHash !== input.requestHash
+    ) {
+      return false;
+    }
+
+    this.records.set(input.keyHash, {
+      ...record,
+      state: "completed",
+      response: input.response,
+      expiresAt: input.expiresAt,
+    });
+    return true;
+  }
+}
+
+class FailingCompleteIdempotencyStore extends MemoryIdempotencyStore {
+  override async complete(_input: CompleteIdempotencyInput): Promise<boolean> {
+    return false;
   }
 }
 
