@@ -14,3 +14,4 @@ src/providers/registry.generated.ts
 *.log
 *.tsbuildinfo
 data/
+/PROJECT_STATUS.md
