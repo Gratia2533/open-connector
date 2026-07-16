@@ -1192,6 +1192,68 @@ describe("ConnectServer", () => {
     });
   });
 
+  it("hides runtime catalog entries excluded by local action policy", async () => {
+    const hiddenAction: ActionDefinition = {
+      ...echoAction,
+      id: "hidden.secret",
+      service: "hidden",
+      name: "secret",
+    };
+    const app = createTestServer(
+      [
+        { ...apiKeyProvider, actions: [echoAction] },
+        {
+          ...apiKeyProvider,
+          service: "hidden",
+          displayName: "Hidden",
+          actions: [hiddenAction],
+        },
+      ],
+      {
+        actionPolicy: new LocalActionPolicyService({ allowedActions: ["example.echo"] }),
+      },
+    ).createApp();
+
+    const hiddenConnection = await app.request("/api/connections/hidden", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authType: "api_key", values: { apiKey: "test-api-key" } }),
+    });
+    expect(hiddenConnection.status).toBe(200);
+
+    await expect((await app.request("/v1/providers")).json()).resolves.toMatchObject({
+      success: true,
+      data: [{ service: "example" }],
+    });
+    await expect((await app.request("/v1/actions")).json()).resolves.toMatchObject({
+      success: true,
+      data: [{ service: "example" }],
+    });
+    await expect((await app.request("/v1/actions?service=hidden")).json()).resolves.toMatchObject({
+      success: true,
+      data: [],
+    });
+    await expect((await app.request("/v1/actions/search?q=secret")).json()).resolves.toMatchObject({
+      success: true,
+      data: [],
+    });
+    expect((await app.request("/v1/actions/hidden.secret")).status).toBe(404);
+
+    await expect((await app.request("/v1/apps")).json()).resolves.toMatchObject({
+      success: true,
+      data: [],
+    });
+    await expect((await app.request("/v1/apps/authenticated")).json()).resolves.toMatchObject({
+      success: true,
+      data: [],
+    });
+    await expect((await app.request("/v1/apps/authenticated?service=hidden")).json()).resolves.toMatchObject({
+      success: true,
+      data: [],
+    });
+    expect((await app.request("/v1/apps/services/hidden")).status).toBe(404);
+  });
+
   it("serves the public v1 runtime catalog and action envelope", async () => {
     const actionWithFollowUp: ActionDefinition = {
       ...echoAction,

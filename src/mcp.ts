@@ -160,6 +160,9 @@ async function listApps(options: IMcpServerOptions, query: string | undefined): 
   const normalized = query?.trim().toLowerCase();
   const providers = options.catalog.providers
     .filter((provider) => {
+      if (!provider.actions.some((action) => isActionVisible(options, action))) {
+        return false;
+      }
       if (!normalized) {
         return true;
       }
@@ -170,14 +173,15 @@ async function listApps(options: IMcpServerOptions, query: string | undefined): 
         .includes(normalized);
     })
     .map(async (provider) => {
+      const visibleActions = provider.actions.filter((action) => isActionVisible(options, action));
       const connection = await options.connections.getConnectionSummary(provider.service);
       return {
         service: provider.service,
         displayName: provider.displayName,
         categories: provider.categories,
         authTypes: provider.authTypes,
-        actionCount: provider.actions.length,
-        executableActionCount: provider.actions.filter((action) => action.execution.locallyExecutable).length,
+        actionCount: visibleActions.length,
+        executableActionCount: visibleActions.filter((action) => action.execution.locallyExecutable).length,
         connection,
       };
     });
@@ -190,14 +194,16 @@ async function searchActions(
   input: { query?: string; service?: string; limit: number },
 ): Promise<unknown> {
   const query = input.query?.trim();
-  const actionSearch = options.actionSearch ?? createActionSearchIndexProvider(options.catalog.actions);
+  const visibleActions = options.catalog.actions.filter((action) => isActionVisible(options, action));
+  const actionSearch = options.actionPolicy
+    ? createActionSearchIndexProvider(visibleActions)
+    : (options.actionSearch ?? createActionSearchIndexProvider(visibleActions));
   const rankedActions = query
     ? searchActionIndex(await actionSearch.get(), query, { service: input.service, limit: input.limit })
         .map((result) => options.catalog.actionsById.get(result.id))
         .filter((action): action is RuntimeActionDefinition => Boolean(action))
-    : options.catalog.actions
-        .filter((action) => !input.service || action.service === input.service)
-        .slice(0, input.limit);
+        .filter((action) => isActionVisible(options, action))
+    : visibleActions.filter((action) => !input.service || action.service === input.service).slice(0, input.limit);
   const actions = rankedActions.map(async (action) => ({
     id: action.id,
     service: action.service,
@@ -212,7 +218,7 @@ async function searchActions(
 
 async function getActionGuide(options: IMcpServerOptions, actionId: string): Promise<ToolPayload> {
   const action = options.catalog.actionsById.get(actionId);
-  if (!action) {
+  if (!action || !isActionVisible(options, action)) {
     return errorPayload("unknown_action", `Unknown action: ${actionId}`);
   }
 
@@ -228,7 +234,7 @@ async function executeAction(
   input: Record<string, unknown>,
 ): Promise<ToolPayload> {
   const action = options.catalog.actionsById.get(actionId);
-  if (!action) {
+  if (!action || !isActionVisible(options, action)) {
     return errorPayload("unknown_action", `Unknown action: ${actionId}`);
   }
 
@@ -250,6 +256,10 @@ async function executeAction(
     };
   }
   return successPayload(run.result.output);
+}
+
+function isActionVisible(options: IMcpServerOptions, action: RuntimeActionDefinition): boolean {
+  return options.actionPolicy?.evaluate(action).allowed !== false;
 }
 
 function summarizeInputSchema(schema: JsonSchema): unknown {
